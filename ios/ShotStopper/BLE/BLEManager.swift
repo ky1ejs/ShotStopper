@@ -12,7 +12,6 @@ final class BLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     var isScanning: Bool { centralManager.isScanning }
     var isConnected: Bool { connectedPeripheral != nil }
-
     var onStateChange: (() -> Void)?
     var onCharacteristicUpdate: ((CBUUID, Data) -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
@@ -60,8 +59,23 @@ final class BLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
 
     func writeValue(_ data: Data, for uuid: CBUUID) {
         guard let peripheral = connectedPeripheral,
-              let characteristic = characteristics[uuid] else { return }
-        peripheral.writeValue(data, for: characteristic, type: .withResponse)
+              let characteristic = characteristics[uuid] else {
+            print("[BLE] Write failed: no peripheral or characteristic not found for \(uuid)")
+            return
+        }
+
+        let type: CBCharacteristicWriteType
+        if characteristic.properties.contains(.write) {
+            type = .withResponse
+        } else if characteristic.properties.contains(.writeWithoutResponse) {
+            type = .withoutResponse
+        } else {
+            print("[BLE] Write failed: characteristic \(uuid) does not support writing (properties: \(characteristic.properties))")
+            return
+        }
+
+        print("[BLE] Writing \(data.map { String(format: "%02x", $0) }.joined()) to \(uuid) (type: \(type == .withResponse ? "withResponse" : "withoutResponse"))")
+        peripheral.writeValue(data, for: characteristic, type: type)
     }
 
     func peripheral(for device: DiscoveredDevice) -> CBPeripheral? {
@@ -95,7 +109,7 @@ final class BLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
     nonisolated func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
         MainActor.assumeIsolated {
             connectedPeripheral = peripheral
-            peripheral.discoverServices([ShotStopperBLE.serviceUUID])
+            peripheral.discoverServices(nil)
             onConnectionChange?(true)
         }
     }
@@ -130,7 +144,8 @@ final class BLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         MainActor.assumeIsolated {
             guard let services = peripheral.services else { return }
             for service in services {
-                peripheral.discoverCharacteristics(ShotStopperCharacteristic.all, for: service)
+                print("[BLE] Discovered service \(service.uuid)")
+                peripheral.discoverCharacteristics(nil, for: service)
             }
         }
     }
@@ -144,12 +159,15 @@ final class BLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
             guard let chars = service.characteristics else { return }
             for characteristic in chars {
                 characteristics[characteristic.uuid] = characteristic
+                print("[BLE] Discovered characteristic \(characteristic.uuid) properties: \(characteristic.properties)")
 
-                if ShotStopperCharacteristic.notifiable.contains(characteristic.uuid) {
+                if characteristic.properties.contains(.notify) {
                     peripheral.setNotifyValue(true, for: characteristic)
                 }
 
-                peripheral.readValue(for: characteristic)
+                if characteristic.properties.contains(.read) {
+                    peripheral.readValue(for: characteristic)
+                }
             }
         }
     }
@@ -160,10 +178,28 @@ final class BLEManager: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate
         error: (any Error)?
     ) {
         MainActor.assumeIsolated {
+            if let error {
+                print("[BLE] Read error for \(characteristic.uuid): \(error)")
+                return
+            }
             guard let data = characteristic.value else { return }
+            print("[BLE] Read \(characteristic.uuid): \(data.map { String(format: "%02x", $0) }.joined())")
             onCharacteristicUpdate?(characteristic.uuid, data)
         }
     }
-}
 
-private typealias ShotStopperCharacteristic = ShotStopperBLE.Characteristic
+    nonisolated func peripheral(
+        _ peripheral: CBPeripheral,
+        didWriteValueFor characteristic: CBCharacteristic,
+        error: (any Error)?
+    ) {
+        MainActor.assumeIsolated {
+            if let error {
+                print("[BLE] Write error for \(characteristic.uuid): \(error)")
+                return
+            }
+            print("[BLE] Write confirmed for \(characteristic.uuid), re-reading...")
+            peripheral.readValue(for: characteristic)
+        }
+    }
+}
