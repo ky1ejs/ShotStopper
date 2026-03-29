@@ -28,6 +28,9 @@ Pods/
 *.swp
 *~
 
+# Claude Code (local settings)
+.claude/settings.local.json
+
 # IDE
 .idea/
 *.pbxuser
